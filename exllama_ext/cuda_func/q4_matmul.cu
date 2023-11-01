@@ -10,16 +10,6 @@
 #include <hip/hip_ext.h>
 #include "rocwmma/rocwmma.hpp"
 #include "../hip_compat.cuh"
-typedef __fp16 half8 __attribute__((ext_vector_type(8)));
-typedef __fp16 half4 __attribute__((ext_vector_type(4)));
-typedef float mfma_float4 __attribute__((ext_vector_type(4)));
-
-#define FLOAT2(pointer) (reinterpret_cast<float2 *>((void *)&(pointer))[0])
-#define MFMA_FLOAT4(pointer) (reinterpret_cast<mfma_float4 *>((void *)&(pointer))[0])
-#define HALF8(pointer) (reinterpret_cast<half8 *>((void *)&(pointer))[0])
-#define HALF4(pointer) (reinterpret_cast<half4 *>((void *)&(pointer))[0])
-#define HALF2(pointer) (reinterpret_cast<half2 *>((void *)&(pointer))[0])
-#define FLOAT(pointer) (reinterpret_cast<float *>((void *)&(pointer))[0])
 const int THREADS_X = 64; // Block size and thread count along columns in w and out
 #else
 const int THREADS_X = 32; // Block size and thread count along columns in w and out
