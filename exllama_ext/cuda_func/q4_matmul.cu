@@ -30,6 +30,7 @@ const int THREADS_Y = 1; // Block size and thread count along rows in x and out
 const int GROUP_STEP = 32; // Assumed group size when block_size_z % groupsize != 0
 #endif
 
+#if defined(USE_ROCM)
 template <typename Y, typename X>
 __host__ __device__ constexpr Y bit_cast(const X &x)
 {
@@ -209,6 +210,7 @@ __device__ __forceinline__ half dot_product_8_wmma(
 
     return result;
 }
+#endif
 
 typedef void (*fp_q4_matmul_kernel)(
     const half *,
