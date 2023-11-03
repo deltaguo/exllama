@@ -5,7 +5,6 @@
 #include "../cuda_compat.cuh"
 #include "../cuda_buffers.cuh"
 #if defined(USE_ROCM)
-#define WMMA_KERNEL
 #include <rocprim/rocprim.hpp>
 #include <hip/hip_ext.h>
 #include "rocwmma/rocwmma.hpp"
@@ -38,18 +37,21 @@ __device__ void transpose_fp16_2x2_register(const half2 &x0, const half2 &x1, ha
     constexpr int32_t m0 = 0x05040100;
     constexpr int32_t m1 = 0x07060302;
 
-    // ex: v_perm_b32(0x 11 22 33 44, 0x 55 66 77 88, 0x 05 04 01 00) -> 0x33774488
+    // ex: v_perm_b32(0x 11 22 33 44, 0x 55 66 77 88, 0x 05 04 01 00) -> 0x33447788
     //                   -- -- -- --     -- -- -- --      -  -  -  -
     //             index  7  6  5  4      3  2  1  0     33 44 77 88
     // index is reversed because of little endianness (least significant bits first)
     y0 = bit_cast<half2>(__builtin_amdgcn_perm(bit_cast<int32_t>(x1), bit_cast<int32_t>(x0), m0));
     y1 = bit_cast<half2>(__builtin_amdgcn_perm(bit_cast<int32_t>(x1), bit_cast<int32_t>(x0), m1));
 }
-
-__device__ __forceinline__ half dot_product_8_wmma(
-    const half acc,
+__device__ __forceinline__ void dot_product_8_wmma(
+    half &acc0,
+    half &acc1,
+    half &acc2,
+    half &acc3,
     MatrixView_half &h_,
     const int h_row,
+    const int h_row_end,
     const int h_column, // divisible by 8
     MatrixView_q4_column &v_,
     const int v_row, // divisible by 8
@@ -58,13 +60,13 @@ __device__ __forceinline__ half dot_product_8_wmma(
     const uint32_t v_zero, // + 1 (!!)
     const int count)
 {
-    // 向量化访存
     using int16_tx2 = __attribute__((__vector_size__(2 * sizeof(int16_t)))) int16_t;
     using halfx4 = __attribute__((__vector_size__(4 * sizeof(__fp16)))) __fp16;
     using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 
 #define INT_16X2(pointer) ((bit_cast<int16_tx2 *>((void *)&(pointer)))[0])
 #define INT_32(pointer) ((bit_cast<int32_t *>((void *)&(pointer)))[0])
+#define HALF(pointer) ((bit_cast<half *>((void *)&(pointer)))[0])
 #define HALF2(pointer) ((bit_cast<half2 *>((void *)&(pointer)))[0])
 #define HALFX4(pointer) ((bit_cast<halfx4 *>((void *)&(pointer)))[0])
 #define FLOATX4(pointer) ((bit_cast<floatx4 *>((void *)&(pointer)))[0])
@@ -72,7 +74,7 @@ __device__ __forceinline__ half dot_product_8_wmma(
     const int K_tile = 32;
     const half *__restrict__ h_ptr = h_.item_ptr(h_row, h_column);
     uint32_t *__restrict__ v_ptr = (uint32_t *)v_.item_uint32_ptr(v_row, v_column);
-    short int v_zero_short = (short int)v_zero;
+    short v_zero_short = (short)v_zero;
 
     int16_t v_zero_2_add16[2];
     v_zero_2_add16[0] = 16 - v_zero_short;
@@ -83,18 +85,14 @@ __device__ __forceinline__ half dot_product_8_wmma(
     half val_1024_half;
     val_1024_half = __float2half(1040);
 
-    // matrix core 寄存器，全部申请为数组，使用时使用向量化访存来做
     half fragA[K_tile / 4][4];
     half fragB[K_tile / 4][4];
     float fragAcc[4] = {(0.0f)};
 
-    // 读取B，使用数组原因：一方面，unroll展开后数组的读取效率高。另一方面，可以计算和访存可以重叠
-    short int v_read_B_q[K_tile / 8][2];
+    short v_read_B_q[K_tile / 8][2];
+    constexpr int sh_A_row_size = 128;
+    __shared__ half sh_A[sh_A_row_size * 4];
 
-    // 用于读取A和最后Acc的数据移动
-    __shared__ half sh_A[K_tile < 64 ? 64 : K_tile];
-
-// 读取B
 #pragma unroll
     for (int i = 0; i < K_tile / 8; i++)
     {
@@ -106,18 +104,16 @@ __device__ __forceinline__ half dot_product_8_wmma(
 #pragma unroll
     for (int k_index = 0; k_index < K_tile / 4; k_index++)
     {
-        fragB[k_index][0] = __short2half_rn((short int)((v_read_B_q[k_index / 2][k_index % 2] >> (0)) & 0x0f) - v_zero_short);
-        fragB[k_index][1] = __short2half_rn((short int)((v_read_B_q[k_index / 2][k_index % 2] >> (4)) & 0x0f) - v_zero_short);
-        fragB[k_index][2] = __short2half_rn((short int)((v_read_B_q[k_index / 2][k_index % 2] >> (8)) & 0x0f) - v_zero_short);
-        fragB[k_index][3] = __short2half_rn((short int)((v_read_B_q[k_index / 2][k_index % 2] >> (12)) & 0x0f) - v_zero_short);
+        fragB[k_index][0] = __short2half_rn((short)((v_read_B_q[k_index / 2][k_index % 2] >> (0)) & 0x0f) - v_zero_short);
+        fragB[k_index][1] = __short2half_rn((short)((v_read_B_q[k_index / 2][k_index % 2] >> (4)) & 0x0f) - v_zero_short);
+        fragB[k_index][2] = __short2half_rn((short)((v_read_B_q[k_index / 2][k_index % 2] >> (8)) & 0x0f) - v_zero_short);
+        fragB[k_index][3] = __short2half_rn((short)((v_read_B_q[k_index / 2][k_index % 2] >> (12)) & 0x0f) - v_zero_short);
     }
 
     int j = 0;
 
     for (; j < count - K_tile / 8; j = j + K_tile / 8)
     {
-
-// 预取下一个B，让B的读取和A的读取，计算重叠
 #pragma unroll
         for (int i = 0; i < K_tile / 8; i++)
         {
@@ -125,23 +121,20 @@ __device__ __forceinline__ half dot_product_8_wmma(
             v_ptr += v_.width;
         }
 
-        /**
-         * 这里是为了不浪费线程。假设K_tile=16。
-         * 那么block需要读取16个数据，但是有64个线程，有48个线程空闲。不妨我们读64个数据，反正这些数据后面也要读取。
-         * 这样每隔4次循环就读取一次
-         **/
-        if ((j * 8) % 128 == 0)
+        if ((j * 8) % sh_A_row_size == 0)
         {
-            HALF2(sh_A[2 * threadIdx.x]) = HALF2(*(h_ptr + (j * 8) + 2 * threadIdx.x));
+            for (int i = 0; i < h_row_end - h_row; ++i)
+            {
+                HALF2(sh_A[2 * threadIdx.x + i * sh_A_row_size]) = HALF2(*(h_ptr + h_.width * i + (j * 8) + 2 * threadIdx.x));
+            }
         }
 
         __syncthreads();
 
-// 读取到fragA
 #pragma unroll
         for (int k_index = 0; k_index < K_tile / 4; k_index++)
         {
-            HALFX4(fragA[k_index][0]) = HALFX4(*(sh_A + (j * 8) % 128 / K_tile * K_tile + k_index * 4));
+            HALFX4(fragA[k_index][0]) = HALFX4(*(sh_A + (j * 8) % 128 / K_tile * K_tile + k_index * 4 + (threadIdx.x % 4) * sh_A_row_size));
         }
 
 #pragma unroll
@@ -171,9 +164,12 @@ __device__ __forceinline__ half dot_product_8_wmma(
         }
     }
 
-    if ((j * 8) % 128 == 0 && threadIdx.x < K_tile)
-    { // 如果 group_size 是 128 的倍数，这里不需要数据读取
-        sh_A[threadIdx.x] = *(h_ptr + (j * 8) + threadIdx.x);
+    if ((j * 8) % sh_A_row_size == 0 && threadIdx.x < K_tile)
+    {
+        for (int i = 0; i < h_row_end - h_row; ++i)
+        {
+            sh_A[threadIdx.x + i * sh_A_row_size] = *(h_ptr + h_.width * i + (j * 8) + threadIdx.x);
+        }
     }
 
     __syncthreads();
@@ -181,7 +177,7 @@ __device__ __forceinline__ half dot_product_8_wmma(
 #pragma unroll
     for (int k_index = 0; k_index < K_tile / 4; k_index++)
     {
-        HALFX4(fragA[k_index][0]) = HALFX4(*(sh_A + (j * 8) % 128 / K_tile * K_tile + k_index * 4));
+        HALFX4(fragA[k_index][0]) = HALFX4(*(sh_A + (j * 8) % 128 / K_tile * K_tile + k_index * 4 + (threadIdx.x % 4) * sh_A_row_size));
     }
 
 #pragma unroll
@@ -190,15 +186,29 @@ __device__ __forceinline__ half dot_product_8_wmma(
         FLOATX4(fragAcc[0]) = __builtin_amdgcn_mfma_f32_4x4x4f16(HALFX4(fragA[k_index][0]), HALFX4(fragB[k_index][0]), FLOATX4(fragAcc[0]), 0, 0, 0);
     }
 
-    // *(sh_A + threadIdx.x % 4 + threadIdx.x / 4 * 4) = __float2half(fragAcc[0]);
-
-    // __syncthreads();
-    // if (threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.z == 0) {
-    //     printf("fragAcc[n_index][0]: %f \n", fragAcc[0]);
-    // }
-    half result = __hadd(__hmul(__float2half(fragAcc[0]), v_scale), acc);
-
-    return result;
+    switch (h_row_end - h_row)
+    {
+    case 1:
+        acc0 = __hadd(__hmul(__float2half(fragAcc[0]), v_scale), acc0);
+        break;
+    case 2:
+        acc0 = __hadd(__hmul(__float2half(fragAcc[0]), v_scale), acc0);
+        acc1 = __hadd(__hmul(__float2half(fragAcc[1]), v_scale), acc1);
+        break;
+    case 3:
+        acc0 = __hadd(__hmul(__float2half(fragAcc[0]), v_scale), acc0);
+        acc1 = __hadd(__hmul(__float2half(fragAcc[1]), v_scale), acc1);
+        acc2 = __hadd(__hmul(__float2half(fragAcc[2]), v_scale), acc2);
+        break;
+    case 4:
+        acc0 = __hadd(__hmul(__float2half(fragAcc[0]), v_scale), acc0);
+        acc1 = __hadd(__hmul(__float2half(fragAcc[1]), v_scale), acc1);
+        acc2 = __hadd(__hmul(__float2half(fragAcc[2]), v_scale), acc2);
+        acc3 = __hadd(__hmul(__float2half(fragAcc[3]), v_scale), acc3);
+        break;
+    default:
+        break;
+    }
 }
 #endif
 
@@ -212,6 +222,9 @@ typedef void (*fp_q4_matmul_kernel)(
     const int,
     const int,
     const int,
+#ifdef WMMA_KERNEL
+    const int,
+#endif 
     const int,
     const uint32_t *,
     bool);
@@ -227,6 +240,9 @@ __global__ void q4_matmul_kernel(
     const int dim,
     const int width,
     const int groupsize,
+#ifdef WMMA_KERNEL
+    const int block_size_y,
+#endif
     const int block_size_z,
     const uint32_t *__restrict__ x_map,
     bool no_zero)
@@ -408,12 +424,12 @@ __global__ void q4_matmul_kernel(
     int x_column = block_size_z * blockIdx.z;
     int x_column_end = min(dim, block_size_z * (blockIdx.z + 1));
     int w_column = THREADS_X * blockIdx.x + threadIdx.x; // assume width of weight matrix divisible by THREADS_X (32)
-    int x_row = THREADS_Y * blockIdx.y + threadIdx.y;    // 0
+    int x_row = block_size_y * blockIdx.y;               // 0
+    int x_row_end = min(height, block_size_y * (blockIdx.y + 1));
 
     int iterations = (x_column_end - x_column) / 8;
 
     // Views
-
     MatrixView_half x_(x, height, dim);
     MatrixView_half w_scales_(w_scales, dim / groupsize, width);
     MatrixView_q4_row w_zeros_(w_zeros, dim / groupsize, width);
@@ -424,15 +440,20 @@ __global__ void q4_matmul_kernel(
 
     if (!no_zero && blockIdx.z == 0 && (threadIdx.x & 1) == 0)
     {
-        *((uint32_t *)out_.item_ptr(x_row, w_column)) = 0;
+        for (int i = 0; i < (x_row_end - x_row); ++i)
+        {
+            *((uint32_t *)out_.item_ptr(x_row + i, w_column)) = 0;
+        }
     }
     __syncthreads();
 
     // Loop over part of x row (and w column)
+    // half acc[4] = {__float2half(0), __float2half(0), __float2half(0), __float2half(0)};
 
-    half2 acc = {};
-    half acc_h = __float2half(0);
-
+    half acc0 = {__float2half(0)};
+    half acc1 = {__float2half(0)};
+    half acc2 = {__float2half(0)};
+    half acc3 = {__float2half(0)};
     if constexpr (use_groupsize)
     {
 
@@ -442,21 +463,41 @@ __global__ void q4_matmul_kernel(
                 half w_scale = w_scales_.item(group, w_column);
                 uint32_t w_zero = w_zeros_.item(group, w_column) + 1;
 
-                acc_h = dot_product_8_wmma(acc_h, x_, x_row, k, w_, k, w_column, w_scale, w_zero, min(block_size_z / 8, groupsize / 8));
+                dot_product_8_wmma(acc0, acc1, acc2, acc3, x_, x_row, x_row_end, k, w_, k, w_column, w_scale, w_zero, min(block_size_z / 8, groupsize / 8));
             }
         }
     }
 
-    half result;
-    result = acc_h;
-    __shared__ half sh_result[64];
-    sh_result[threadIdx.x] = result;
-    __syncthreads();
-    if (threadIdx.x % 2 == 0)
+    __shared__ half sh_result[4 * THREADS_X];
+    
+    if (x_row_end - x_row > 0)
     {
-        atomicAdd((half2 *)out_.item_ptr(x_row, w_column), HALF2(sh_result[threadIdx.x]));
+        sh_result[threadIdx.x] = acc0;
+        __syncthreads();
+        if (threadIdx.x % 2 == 0)
+            atomicAdd((half2 *)out_.item_ptr(x_row, w_column), HALF2(sh_result[threadIdx.x]));
+        if (x_row_end - x_row > 1)
+        {
+            sh_result[threadIdx.x + THREADS_X] = acc1;
+            __syncthreads();
+            if (threadIdx.x % 2 == 0)
+                atomicAdd((half2 *)out_.item_ptr(x_row + 1, w_column), HALF2(sh_result[THREADS_X + threadIdx.x]));
+            if (x_row_end - x_row > 2)
+            {
+                sh_result[threadIdx.x + 2 * THREADS_X] = acc2;
+                __syncthreads();
+                if (threadIdx.x % 2 == 0)
+                    atomicAdd((half2 *)out_.item_ptr(x_row + 2, w_column), HALF2(sh_result[2 * THREADS_X + threadIdx.x]));
+                if (x_row_end - x_row > 2)
+                {
+                    sh_result[threadIdx.x + 3 * THREADS_X] = acc3;
+                    __syncthreads();
+                    if (threadIdx.x % 2 == 0)
+                        atomicAdd((half2 *)out_.item_ptr(x_row + 3, w_column), HALF2(sh_result[3 * THREADS_X + threadIdx.x]));
+                }
+            }
+        }
     }
-
 #endif
 }
 
@@ -544,15 +585,21 @@ void q4_matmul_cuda(
         block_size_z = 128;
     else
         block_size_z = 256;
-
+    int block_size_y = 4;
     // if (!no_zero) cudaMemsetAsync(out, 0, x_height * w->width * sizeof(half));
 
     dim3 threads(THREADS_X, THREADS_Y, 1);
-
+#ifndef WMMA_KERNEL
     dim3 blocks(
         (width + threads.x - 1) / threads.x,
         (height + threads.y - 1) / threads.y,
         (dim + block_size_z - 1) / block_size_z);
+#else
+    dim3 blocks(
+        (width + threads.x - 1) / threads.x,
+        (height + block_size_y - 1) / block_size_y,
+        (dim + block_size_z - 1) / block_size_z);
+#endif
 
     fp_q4_matmul_kernel kernel = q4_matmul_kernel_pick(tuningParams, block_size_z, w->groupsize, x_map);
 
@@ -566,7 +613,21 @@ void q4_matmul_cuda(
 
 #endif
 
-    kernel<<<blocks, threads, shared_mem, alt_stream>>>(x_mapped, w->cuda_qweight, out, w->cuda_scales, w->cuda_qzeros, height, dim, width, w->groupsize, block_size_z, x_map, no_zero);
+    kernel<<<blocks, threads, shared_mem, alt_stream>>>(x_mapped, 
+                                                        w->cuda_qweight, 
+                                                        out, 
+                                                        w->cuda_scales, 
+                                                        w->cuda_qzeros, 
+                                                        height, 
+                                                        dim, 
+                                                        width, 
+                                                        w->groupsize,
+#ifdef WMMA_KERNEL
+                                                        block_size_y,
+#endif 
+                                                        block_size_z, 
+                                                        x_map, 
+                                                        no_zero);
 }
 
 void q4_matmul_recons_cuda(
