@@ -5,9 +5,15 @@
 #include "../util_hip.cuh"
 #include "../matrix_hip.cuh"
 
+#if defined(USE_ROCM)
+const int THREADS_X = 64;
+const int THREADS_Y = 1;
+const int BLOCKSIZE_X = 256;
+#else
 const int THREADS_X = 32;
 const int THREADS_Y = 8;
 const int BLOCKSIZE_X = 16;
+#endif
 
 // scratch = sum(x * x, dim = -1)
 

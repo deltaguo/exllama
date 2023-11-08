@@ -23,6 +23,7 @@ torch_devices = [f"cuda:{i}" for i in range(torch.cuda.device_count())]
 
 cache = None
 model = None
+bz = 1
 
 def begin():
     global model, cache
@@ -133,8 +134,7 @@ model_init.print_stats(model)
 
 torch.cuda.reset_peak_memory_stats("cuda")
 mem("Model")
-
-cache = ExLlamaCache(model)
+cache = ExLlamaCache(model, batch_size = bz)
 mem("Cache")
 
 # Load LoRA
@@ -154,7 +154,7 @@ if args.lora:
 
 gen_tokens = 128
 max_seq_len = args.length
-ids = torch.randint(0, 31999, (1, max_seq_len - gen_tokens)).cuda()
+ids = torch.randint(0, 31999, (bz, max_seq_len - gen_tokens)).cuda()
 
 # Benchmark memory and performance
 
@@ -178,20 +178,26 @@ if args.perf:
 
     t = time.time() - t
     print(f" ** Speed: {ids.shape[-1] / t:.2f} tokens/second")
-
     for j in range(2):
 
         t = time.time()
         print(f" -- Generating {gen_tokens} tokens, {ids.shape[-1]} token prompt...")
+        count = 0
         for i in range(gen_tokens):
 
-            logits = logits[0, -1, :]
-            token = torch.argmax(logits)
-            next_id = token.unsqueeze(0).unsqueeze(0)
+            # logits = logits[0, -1, :]
+            # token = torch.argmax(logits)
+            # next_id = token.unsqueeze(0).unsqueeze(0)
+            # logits = next_logits(next_id, lora)
+            logits = logits[:, -1, :]
+            token = torch.argmax(logits, dim = -1)
+            next_id = token.unsqueeze(1)
             logits = next_logits(next_id, lora)
+            # count = count + 1
+            # print(count)
 
         t = time.time() - t
-        print(f" ** Speed: {gen_tokens / t:.2f} tokens/second")
+        print(f" ** Speed: {bz * gen_tokens / t:.2f} tokens/second")
 
         ids = ids[:, :4]
         cache.current_seq_len = 4
