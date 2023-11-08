@@ -415,7 +415,11 @@ __global__ void q4_matmul_kernel(
 
     if constexpr (use_half2)
     {
+#if defined(USE_SMEM)
+        half result = __hadd(__low2half(acc), __low2high(acc));
+#else
         half result = __hadd(acc.x, acc.y);
+#endif
         atomicAdd(out_.item_ptr(x_row, w_column), result);
     }
     else

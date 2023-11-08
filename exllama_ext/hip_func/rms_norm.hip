@@ -5,15 +5,9 @@
 #include "../util_hip.cuh"
 #include "../matrix_hip.cuh"
 
-#if defined(USE_ROCM)
-const int THREADS_X = 64;
-const int THREADS_Y = 1;
-const int BLOCKSIZE_X = 256;
-#else
 const int THREADS_X = 32;
 const int THREADS_Y = 8;
 const int BLOCKSIZE_X = 16;
-#endif
 
 // scratch = sum(x * x, dim = -1)
 
@@ -58,8 +52,13 @@ __global__ void rms_norm_row_product_kernel
         for (int k = 0; k < BLOCKSIZE_X / 2; k++)
         {
             half2 x2 = *x_ptr++;
+#if defined(USE_ROCM)
+            float m0 = __half2float(__low2half(x2));
+            float m1 = __half2float(__high2half(x2));
+#else
             float m0 = __half2float(x2.x);
             float m1 = __half2float(x2.y);
+#endif
             acc = fma(m0, m0, acc);
             acc = fma(m1, m1, acc);
         }

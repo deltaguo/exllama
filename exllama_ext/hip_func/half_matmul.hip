@@ -43,8 +43,14 @@ __global__ void half_matmul_kernel
     for (int k = k0; k < k0 + BLOCKSIZE / 2; k++)
     {
         half2 x_item = *x_ptr++;
+#if defined(USE_ROCM)
+        half2 x_item_0 = __half2half2(__low2half(x_item));
+        half2 x_item_1 = __half2half2(__high2half(x_item));
+#else
         half2 x_item_0 = __half2half2(x_item.x);
         half2 x_item_1 = __half2half2(x_item.y);
+#endif
+
         half2 w_item_0 = *w_ptr; w_ptr += w_.width / 2;
         half2 w_item_1 = *w_ptr; w_ptr += w_.width / 2;
         acc = __hfma2(x_item_0, w_item_0, acc);
@@ -186,7 +192,11 @@ __global__ void half_matmul_small_kernel
             r = __hfma2(x_23, w_23, r);
         }
 
+#if defined(USE_ROCM)
+        half rh = __hadd(__low2half(r), __high2half(r));
+#else
         half rh = __hadd(r.x, r.y);
+#endif
 
         __shared__ half accum[MAX_DIM_SMALL / S_BLOCKSIZE][S_THREADS_X];
         accum[threadIdx.y][threadIdx.x] = rh;

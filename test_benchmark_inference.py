@@ -41,7 +41,6 @@ def next_logits(input_ids, apply_lora, last_id_only = True, input_mask = None):
     #     b = min(input_ids.shape[-1], a + 2048)
     #     n_logits = model.forward(input_ids[:, a:b], cache, last_id_only, lora = apply_lora, input_mask = input_mask)
     #     a = b
-
     n_logits = model.forward(input_ids, cache, last_id_only, lora=apply_lora, input_mask=input_mask)
     return n_logits
 
@@ -154,7 +153,8 @@ if args.lora:
 
 gen_tokens = 128
 max_seq_len = args.length
-ids = torch.randint(0, 31999, (bz, max_seq_len - gen_tokens)).cuda()
+torch.manual_seed(0)
+ids = torch.randint(0, 31999, (bz, 1024)).cuda()
 
 # Benchmark memory and performance
 
@@ -162,10 +162,10 @@ if args.perf:
 
     # Warming up apparently makes a huge difference
 
-    for i in range(1, 3):
-        print(f" -- Warmup pass {i}...")
-        begin()
-        logits = timer("Warmup", lambda: next_logits(ids, lora))
+    # for i in range(1, 3):
+    #     print(f" -- Warmup pass {i}...")
+    #     begin()
+    #     logits = timer("Warmup", lambda: next_logits(ids, lora))
 
     # Do the actual benchmark
 
@@ -178,11 +178,10 @@ if args.perf:
 
     t = time.time() - t
     print(f" ** Speed: {ids.shape[-1] / t:.2f} tokens/second")
-    for j in range(2):
+    for j in range(3):
 
         t = time.time()
         print(f" -- Generating {gen_tokens} tokens, {ids.shape[-1]} token prompt...")
-        count = 0
         for i in range(gen_tokens):
 
             # logits = logits[0, -1, :]
@@ -193,14 +192,12 @@ if args.perf:
             token = torch.argmax(logits, dim = -1)
             next_id = token.unsqueeze(1)
             logits = next_logits(next_id, lora)
-            # count = count + 1
-            # print(count)
-
         t = time.time() - t
+        #print(logits)
         print(f" ** Speed: {bz * gen_tokens / t:.2f} tokens/second")
 
-        ids = ids[:, :4]
-        cache.current_seq_len = 4
+        # ids = ids[:, :4]
+        # cache.current_seq_len = 4
 
     mem("Inference")
     mem("Total", total = True)
