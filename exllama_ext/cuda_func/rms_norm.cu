@@ -7,6 +7,12 @@ const int THREADS_X = 32;
 const int THREADS_Y = 8;
 const int BLOCKSIZE_X = 16;
 
+#if defined(USE_ROCM)
+const int THREADS_X_RP = 64;
+const int THREADS_Y_RP = 1;
+const int BLOCKSIZE_X_RP = 256;
+#endif
+
 // scratch = sum(x * x, dim = -1)
 
 typedef void (*fp_rms_norm_row_product_kernel)
@@ -26,8 +32,13 @@ __global__ void rms_norm_row_product_kernel
     const int dim
 )
 {
+#if defined(USE_ROCM)
+    int column = (THREADS_X_RP * blockIdx.x + threadIdx.x) * BLOCKSIZE_X_RP;
+    int row = THREADS_Y_RP * blockIdx.y + threadIdx.y;
+#else
     int column = (THREADS_X * blockIdx.x + threadIdx.x) * BLOCKSIZE_X;
     int row = THREADS_Y * blockIdx.y + threadIdx.y;
+#endif
     if (row >= rows) return;
     if (column >= dim) return;
 
@@ -46,8 +57,12 @@ __global__ void rms_norm_row_product_kernel
     {
         half2* x_ptr = (half2*) &x[idx];
 
-        #pragma unroll
+#pragma unroll
+#if defined(USE_ROCM)
+        for (int k = 0; k < BLOCKSIZE_X_RP / 2; k++)
+#else
         for (int k = 0; k < BLOCKSIZE_X / 2; k++)
+#endif
         {
             half2 x2 = *x_ptr++;
 #if defined(USE_ROCM)
@@ -64,9 +79,12 @@ __global__ void rms_norm_row_product_kernel
     else
     {
         half* x_ptr = x + idx;
-
-        #pragma unroll
+#pragma unroll
+#if defined(USE_ROCM)
+        for (int k = 0; k < BLOCKSIZE_X_RP; k++)
+#else
         for (int k = 0; k < BLOCKSIZE_X; k++)
+#endif
         {
             float m0 = __half2float(*x_ptr++);
             acc = fma(m0, m0, acc);
@@ -197,9 +215,18 @@ void rms_norm_cuda
 
     float r_dim = 1.0f / (float) dim;
 
-    dim3 threads(THREADS_X, THREADS_Y, 1);
 
-    dim3 blocks
+#if defined(USE_ROCM)
+    dim3 threads1(THREADS_X_RP, THREADS_Y_RP, 1);
+    dim3 blocks1
+    (
+        ((dim + THREADS_X_RP - 1) / THREADS_X_RP + BLOCKSIZE_X_RP - 1) / BLOCKSIZE_X_RP,
+        (rows + THREADS_Y_RP - 1) / THREADS_Y_RP,
+        1
+    );
+#endif
+    dim3 threads2(THREADS_X, THREADS_Y, 1);
+    dim3 blocks2
     (
         ((dim + THREADS_X - 1) / THREADS_X + THREADS_X - 1) / BLOCKSIZE_X,
         (rows + THREADS_Y - 1) / THREADS_Y,
@@ -209,10 +236,14 @@ void rms_norm_cuda
     //cudaMemsetAsync(temp, 0, rows * sizeof(float));
 
     fp_rms_norm_row_product_kernel kernel1 = rms_norm_row_product_kernel_pick(tuningParams);
-    kernel1<<<blocks, threads>>>(x, temp, rows, dim);
+#if defined(USE_ROCM)
+    kernel1<<<blocks1, threads1>>>(x, temp, rows, dim);
+#else
+    kernel1<<<blocks2, threads2>>>(x, temp, rows, dim);
+#endif
 
     fp_rms_norm_kernel kernel2 = rms_norm_kernel_pick(tuningParams);
-    kernel2<<<blocks, threads>>>(x, w, out, temp, epsilon, r_dim, rows, dim);
+    kernel2<<<blocks2, threads2>>>(x, w, out, temp, epsilon, r_dim, rows, dim);
 
     //cudaMemsetAsync(temp, 0, rows * sizeof(float));
 }

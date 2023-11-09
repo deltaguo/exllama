@@ -82,14 +82,12 @@ __device__ __forceinline__ void dot_product_8_wmma(
 
     half2 val_1040_half2;
     val_1040_half2 = __half2half2(__float2half(1040));
-    half val_1024_half;
-    val_1024_half = __float2half(1040);
 
     half fragA[K_tile / 4][4];
     half fragB[K_tile / 4][4];
     float fragAcc[4] = {(0.0f)};
 
-    short v_read_B_q[K_tile / 8][2];
+    int16_t v_read_B_q[K_tile / 8][2];
     constexpr int sh_A_row_size = 128;
     __shared__ half sh_A[sh_A_row_size * 4];
 
