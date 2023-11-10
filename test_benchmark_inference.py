@@ -150,11 +150,11 @@ if args.lora:
         print(f" !! Warning: LoRA zero bias ignored")
 
 # Test sequence
-
-gen_tokens = 128
+input_length = 1024
+gen_tokens = 256
 max_seq_len = args.length
 torch.manual_seed(0)
-ids = torch.randint(0, 31999, (bz, max_seq_len - gen_tokens)).cuda()
+ids = torch.randint(0, 31999, (bz, input_length)).cuda()
 
 # Benchmark memory and performance
 
@@ -178,7 +178,7 @@ if args.perf:
 
     t = time.time() - t
     print(f" ** Speed: {ids.shape[-1] / t:.2f} tokens/second")
-    for j in range(2):
+    for j in range(4):
 
         t = time.time()
         print(f" -- Generating {gen_tokens} tokens, {ids.shape[-1]} token prompt...")
@@ -196,8 +196,8 @@ if args.perf:
         # print(logits)
         print(f" ** Speed: {bz * gen_tokens / t:.2f} tokens/second")
 
-        ids = ids[:, :4]
-        cache.current_seq_len = 4
+        # ids = ids[:, :input_length]
+        cache.current_seq_len = input_length
 
     mem("Inference")
     mem("Total", total = True)
