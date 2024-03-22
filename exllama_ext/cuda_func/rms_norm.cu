@@ -174,8 +174,10 @@ fp_rms_norm_kernel rms_norm_kernel_pick(ExLlamaTuning* tuningParams)
     }
 };
 #else
-#define NUM_WARPS (16)
-#define WARP_SIZE (64)
+#define NUM_WARPS (1024 / warpSize)
+#define WARP_SIZE (warpSize)
+#define LANE_OFFSET (4)
+
 #define DIVIDE(x, size) (((x) + (size) - 1) / (size))
 
 #define BLOCK_SIZE WARP_SIZE
@@ -215,7 +217,7 @@ __global__ void rms_norm_kernel
 
     float sum = 0.0f;
     float itemf[blocks_per_warp][2];
-    __shared__ float sum_[1024];
+    //__shared__ float sum_[1024];
 
     #pragma unroll
     for (int i = 0; i < blocks_per_warp; i++)
@@ -236,10 +238,12 @@ __global__ void rms_norm_kernel
     // sum_[threadIdx.x]= sum;
     // Shuffle to sum across lanes
 
-    __shared__ float sums[NUM_WARPS];
+    // __shared__ float sums[NUM_WARPS];
+    __shared__ float sums[WARP_SIZE];
+    if(warp_id == 0)sums[lane_id] = 0.f;
 
     for(int offset = warpSize / 2; offset > 0; offset /= 2) sum += __shfl_xor(sum, offset);
-    if (lane_id == 0) sums[warp_id] = sum;
+    if (lane_id == 0) sums[warp_id * LANE_OFFSET] = sum;
     __syncthreads();
 
     // Load partial sums from across warps, shuffle again across lanes
@@ -335,7 +339,6 @@ void rms_norm_cuda
     gridDim.y = 1;
 
     float r_dim = 1.0f / (float) dim;
-
     int blocks_per_warp = DIVIDE(dim, NUM_THREADS * 2);
     fp_rms_norm_kernel kernel = pick_rms_norm_kernel(blocks_per_warp);
     kernel<<<gridDim, blockDim>>>(x, w, out, epsilon, r_dim, rows, dim);
