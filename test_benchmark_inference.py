@@ -150,8 +150,8 @@ if args.lora:
         print(f" !! Warning: LoRA zero bias ignored")
 
 # Test sequence
-input_length = 1024
-gen_tokens = 256
+input_length = 256
+gen_tokens = 128
 max_seq_len = args.length
 torch.manual_seed(0)
 ids = torch.randint(0, 31999, (bz, input_length)).cuda()
